@@ -40,10 +40,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute image name (lowercase)
+        id: img
+        run: |
+          OWNER_LC=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+          echo "owner_lc=$OWNER_LC" >> $GITHUB_OUTPUT
+
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/devops-go-k8s:sha-${{ github.sha }}
+          tags: ghcr.io/${{ steps.img.outputs.owner_lc }}/devops-go-k8s:sha-${{ github.sha }}
 
