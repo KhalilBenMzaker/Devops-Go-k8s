@@ -1,0 +1,226 @@
+# =========================
+# 0) Namespace
+# =========================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: devops-go	
+routes	"/hello, /health"
+service	"hello-devops-go"
+  labels:
+    app.kubernetes.io/name: devops-go
+
+---
+# =========================
+# 1) ConfigMap (non-secret config)
+# =========================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: devops-go-config
+  namespace: devops-go
+data:
+  PORT: "8080"
+
+---
+# =========================
+# 2) ServiceAccount (good practice; no extra permissions by default)
+# =========================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: devops-go-sa
+  namespace: devops-go
+automountServiceAccountToken: false
+
+---
+# =========================
+# 3) Deployment (production-style)
+# =========================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: devops-go
+  namespace: devops-go
+  labels:
+    app.kubernetes.io/name: devops-go
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: devops-go
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: devops-go
+    spec:
+      serviceAccountName: devops-go-sa
+      terminationGracePeriodSeconds: 30
+
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: devops-go
+          image: devops-go:1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+
+          envFrom:
+            - configMapRef:
+                name: devops-go-config
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+
+          # Production-grade probes:
+          # - startupProbe: give time to start (prevents restart loops)
+          # - readinessProbe: controls traffic routing
+          # - livenessProbe: restarts if stuck/broken
+          startupProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 30  # up to ~60s
+
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]
+
+---
+# =========================
+# 4) Service (stable internal access)	
+routes	"/hello, /health"
+service	"hello-devops-go"
+# =========================
+apiVersion: v1
+kind: Service
+metadata:
+  name: devops-go
+  namespace: devops-go
+  labels:
+    app.kubernetes.io/name: devops-go
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: devops-go
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+
+---
+# =========================
+# 5) PodDisruptionBudget (keeps availability during node maintenance)
+# =========================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: devops-go-pdb
+  namespace: devops-go
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: devops-go
+
+---
+# =========================
+# 6) HorizontalPodAutoscaler (OPTIONAL)
+# Requires metrics-server installed
+# =========================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: devops-go-hpa
+  namespace: devops-go
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: devops-go
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+---
+# =========================
+# 7) NetworkPolicy (OPTIONAL)
+# Note: kind default CNI may not enforce NetworkPolicies.
+# =========================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: devops-go-default-deny
+  namespace: devops-go
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: devops-go-allow-ingress-to-app
+  namespace: devops-go
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: devops-go
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: devops-go
+      ports:
+        - protocol: TCP
+          port: 8080
+
